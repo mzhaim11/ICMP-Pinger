@@ -5,22 +5,33 @@ import struct
 import time
 import select
 import binascii
+import math
+from statistics import *
+import datetime
+# Should use stdev
+packet_min = 0
+packet_avg = 0
+packet_max = 0
+pstdev_var=0
+packageRev=0
+packageSent=0
 ICMP_ECHO_REQUEST = 8
 
-def checksum(str_):
-    # In this function we make the checksum of our packet 
-    str_ = bytearray(str_)
+
+def checksum(string):
     csum = 0
-    countTo = (len(str_) // 2) * 2
+    countTo = (len(string) // 2) * 2
+    count = 0
 
-    for count in range(0, countTo, 2):
-        thisVal = str_[count+1] * 256 + str_[count]
-        csum = csum + thisVal
-        csum = csum & 0xffffffff
+    while count < countTo:
+        thisVal = (string[count + 1]) * 256 + (string[count])
+        csum += thisVal
+        csum &= 0xffffffff
+        count += 2
 
-    if countTo < len(str_):
-        csum = csum + str_[-1]
-        csum = csum & 0xffffffff
+    if countTo < len(string):
+        csum += (string[len(string) - 1])
+        csum &= 0xffffffff
 
     csum = (csum >> 16) + (csum & 0xffff)
     csum = csum + (csum >> 16)
@@ -29,36 +40,44 @@ def checksum(str_):
     answer = answer >> 8 | (answer << 8 & 0xff00)
     return answer
 
+
+
 def receiveOnePing(mySocket, ID, timeout, destAddr):
     timeLeft = timeout
+
     while 1:
         startedSelect = time.time()
         whatReady = select.select([mySocket], [], [], timeLeft)
         howLongInSelect = (time.time() - startedSelect)
-        if whatReady[0] == []: # Timeout
+        if whatReady[0] == []:  # Timeout
             return "Request timed out."
 
         timeReceived = time.time()
         recPacket, addr = mySocket.recvfrom(1024)
 
-        icmpHeader = recPacket[20:28]
-        icmpType, code, mychecksum, packetID, sequence = struct.unpack("bbHHh", icmpHeader)
-    
-        if type != 8 and packetID == ID:
-            bytesInDouble = struct.calcsize("d")
-            timeSent = struct.unpack("d", recPacket[28:28 + bytesInDouble])[0]
-            return timeReceived - timeSent
+        # Fill in start
+        header = recPacket[20: 28]
+        type, code, checksum, packetID, sequence = struct.unpack("!bbHHh", header)
+        if type ==0 and packetID == ID:
+            byte_in_double = struct.calcsize("!d")
+            timeSent = struct.unpack("!d", recPacket[28: 28 + byte_in_double])[0]
+            delay   = (timeReceived - timeSent) * 1000
+            ttl = ord(struct.unpack("!c", recPacket[8:9])[0].decode())
+            return (delay,ttl,byte_in_double)
 
+        # Fetch the ICMP header from the IP packet
+
+        # Fill in end
         timeLeft = timeLeft - howLongInSelect
-        
         if timeLeft <= 0:
             return "Request timed out."
+
 
 def sendOnePing(mySocket, destAddr, ID):
     # Header is type (8), code (8), checksum (16), id (16), sequence (16)
 
     myChecksum = 0
-    # Make a dummy header with a 0 checksum.
+    # Make a dummy header with a 0 checksum
     # struct -- Interpret strings as packed binary data
     header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, myChecksum, ID, 1)
     data = struct.pack("d", time.time())
@@ -66,39 +85,76 @@ def sendOnePing(mySocket, destAddr, ID):
     myChecksum = checksum(header + data)
 
     # Get the right checksum, and put in the header
+
     if sys.platform == 'darwin':
+        # Convert 16-bit integers from host to network  byte order
         myChecksum = htons(myChecksum) & 0xffff
-    #Convert 16-bit integers from host to network byte order.
     else:
         myChecksum = htons(myChecksum)
 
+
     header = struct.pack("bbHHh", ICMP_ECHO_REQUEST, 0, myChecksum, ID, 1)
     packet = header + data
-    mySocket.sendto(packet, (destAddr, 1)) # AF_INET address must be tuple, not str
-    #Both LISTS and TUPLES consist of a number of objects
-    #which can be referenced by their position number within the object
 
-def doOnePing(destAddr, timeout):         
-    icmp = getprotobyname("icmp") 
-    #Create Socket here
-    mySocket = socket(AF_INET, SOCK_DGRAM, icmp) 
+    mySocket.sendto(packet, (destAddr, 1))  # AF_INET address must be tuple, not str
 
-    myID = os.getpid() & 0xFFFF  #Return the current process i     
-    sendOnePing(mySocket, destAddr, myID) 
-    delay = receiveOnePing(mySocket, myID, timeout, destAddr)          
 
-    mySocket.close()         
-    return delay  
+    # Both LISTS and TUPLES consist of a number of objects
+    # which can be referenced by their position number within the object.
 
-def ping(host, timeout=1):
-    dest = gethostbyname(host)
-    print ("Pinging " + dest + " using Python:")
-    print ("")
-    #Send ping requests to a server separated by approximately one second
-    while 1 :
-        delay = doOnePing(dest, timeout)
-        print (delay)
-        time.sleep(1)# one second
+def doOnePing(destAddr, timeout):
+    icmp = getprotobyname("icmp")
+
+
+    # SOCK_RAW is a powerful socket type. For more details:   http://sockraw.org/papers/sock_raw
+    mySocket = socket(AF_INET, SOCK_RAW, icmp)
+
+    myID = os.getpid() & 0xFFFF  # Return the current process i
+    sendOnePing(mySocket, destAddr, myID)
+    delay = receiveOnePing(mySocket, myID, timeout, destAddr)
+    mySocket.close()
     return delay
 
-ping("127.0.0.1")
+
+def ping(host, timeout=1):
+    # timeout=1 means: If one second goes by without a reply from the server,  	# the client assumes that either the client's ping or the server's pong is lost
+    dest = gethostbyname(host)
+    print("Pinging " + dest + " using Python:")
+    byte_in_double = struct.calcsize("d")
+    #print("")
+
+    # Calculate vars values and return them
+    #vars = [str(round(packet_min, 2)), str(round(packet_avg, 2)), str(round(packet_max, 2)),str(round(stdev(stdev_var), 2))]
+    # Send ping requests to a server separated by approximately one second
+    rtts = []
+    mean = 0
+    minimium = 1000
+    maximium = -1
+    stdv = 0
+    for i in range(0, 4):
+        time_start = datetime
+        delay = doOnePing(dest, timeout)
+        time_stop = datetime.datetime.now()
+        time_diff = time_stop - time_start
+        rtt = time_diff.total_seconds()*1000
+        rtt = round(rtt,3)
+        rtts.apend(rtt)
+        mean = mean +rtt
+        maximium = max(maximium, rtt)
+        minimium = min(minimum, rtt)
+        print("Reply from", dest, ":", "bytes=", byte_in_double, "time=", delay[1], "TTL=", rtt,"ms")
+    mean /=4
+    packet_min=minimium
+    packet_max=maximium
+    packet_avg=mean
+    dev = 0
+    i=0
+    while i<4:
+        dev=dev+((rtts[i]-mean)*(rtts[i]-mean))
+        i+=1
+    pstdev_var=math.sqrt(dev/4)
+    vars = [str(round(packet_min, 2)), str(round(packet_avg, 2)), str(round(packet_max, 2)),str(round(stdev(stdev_var), 2))]
+    return vars
+
+if __name__ == '__main__':
+    ping("google.co.il")
